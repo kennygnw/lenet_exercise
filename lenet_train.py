@@ -44,6 +44,9 @@ train_dataloader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuf
 val_dataloader = DataLoader(dataset=val_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
 net = lenet_model.LeNet5()
+# Set quantization config
+net.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+torch.quantization.prepare_qat(net, inplace=True)
 
 # set loss function and optimizer
 loss_fn = nn.CrossEntropyLoss()
@@ -116,8 +119,11 @@ MODEL_PATH.mkdir(parents=True, exist_ok=True)
 
 MODEL_NAME = f"lenet5_mnist_{time_start}.pth"
 MODEL_SAVE_PATH = MODEL_PATH / MODEL_NAME
+quantized_model = torch.quantization.convert(net.cpu(), inplace=False)
+torch.save(quantized_model.state_dict(), f=MODEL_PATH / f"quantized_{MODEL_NAME}")
+
 
 # Saving the model
-print(f"Saving the model: {MODEL_SAVE_PATH}")
-torch.save(obj=net.state_dict(), f=MODEL_SAVE_PATH)
+# print(f"Saving the model: {MODEL_SAVE_PATH}")
+# torch.save(obj=net.state_dict(), f=MODEL_SAVE_PATH)
 writer.close()
