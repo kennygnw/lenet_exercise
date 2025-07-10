@@ -4,6 +4,27 @@ static inline uint8_t round_to_uint8(float x)
 {
     return (uint8_t)(x + (x >= 0 ? 0.5f : -0.5f));
 }
+// static inline int8_t round_to_int8(float x)
+// {
+//     return (int8_t)(x + (x >= 0 ? 0.5f : -0.5f));
+// }
+static inline int8_t banker_roundf_to_int8(float x)
+{
+    int8_t i  = (int8_t)x;          /* trunc toward zero (C rule) */
+    float   d  = x - (float)i;        /* fractional part */
+
+    if (x >= 0.0f) {
+        if (d >  0.5f) return i + 1;          /* > .5  → ceil  */
+        if (d <  0.5f) return i;              /* < .5  → trunc */
+        /* exactly .5 : make result even     */
+        return (i & 1) ? i + 1 : i;
+    } else { /* x < 0 */
+        if (d < -0.5f) return i - 1;          /* < -.5 → floor */
+        if (d > -0.5f) return i;              /* > -.5 → trunc */
+        /* exactly -.5 : tie to even         */
+        return (i & 1) ? i - 1 : i;
+    }
+}
 /* --- small helper: single-value requantiser ----------------------------- */
 static inline uint8_t requantize_fixed_point(
         int32_t src,
@@ -34,19 +55,22 @@ void conv2d(
     uint8_t       *output,
     /* per-output-channel parameters */
     const int32_t *bias,         /* [C_out]  */
-    const int32_t *multiplier,   /* [C_out]  */
-    const int8_t  *right_shift,  /* [C_out]  */
-    const uint8_t *out_zp,       /* [C_out]  */
+    const float output_scale,
+    // no need for fixed point
+    // const int32_t *multiplier,   /* [C_out]  */
+    // const int8_t  *right_shift,  /* [C_out]  */
     /* zero-points common to every channel */
     uint8_t  x_zp,               /* input  zero-point */
     int8_t   w_zp,               /* weight zero-point (often 0) */
+    uint8_t out_zp,       
     /* convolution hyper-params */
     int stride,
     int padding)
 {
     int H_out = (H_in + 2 * padding - K) / stride + 1;
     int W_out = (W_in + 2 * padding - K) / stride + 1;
-
+    float y_float; 
+    uint8_t i8_result;
 
     /* loop order:  b | oc | i | j | ic | ki | kj -------------------- */
     for (int b = 0; b < B; ++b)
@@ -56,7 +80,7 @@ void conv2d(
 
         for (int oc = 0; oc < C_out; ++oc)
         {
-            printf("channel %d\n", oc);
+            // printf("channel %d\n", oc);
             int32_t  b_add   = bias[oc];
             // commented since currently the application is per tensor not per channel
             // int32_t  mul     = multiplier [oc];
@@ -70,7 +94,6 @@ void conv2d(
                 {
                     int start_j = j * stride - padding;
                     int32_t sum = 0;
-
                     for (int ic = 0; ic < C_in; ++ic)
                     {
                         const uint8_t *in_c =
@@ -102,8 +125,16 @@ void conv2d(
                     }
 
                     sum += b_add;
-                    out_b[(oc * H_out + i) * W_out + j] = requantize_fixed_point(sum, *multiplier, *right_shift, *out_zp);
+                    // printf("%d,", sum);
+
+                    y_float = (float)sum * output_scale;
+                    // printf("%.3f,", y_float);
+                    i8_result = banker_roundf_to_int8(y_float);
+                    i8_result += out_zp;
+                    // printf("%d,", i8_result);
+                    out_b[(oc * H_out + i) * W_out + j] = i8_result;
                 }
+                // printf("\n");
             }
         }
     }
@@ -186,40 +217,49 @@ void quantize_image(
     }
 }
 
-void maxpool2d(uint8_t *input,
-                             int C_in, int H_in, int W_in,
-                             int K, int stride,
-                             uint8_t *output)
+void maxpool2d(
+            uint8_t *input,
+            uint8_t B_in, int C_in, int H_in, int W_in,
+            int K, int stride,
+            uint8_t *output)
 {
     int H_out = (H_in - K) / stride + 1;
     int W_out = (W_in - K) / stride + 1;
     // printf("H_out: %d, W_out: %d",H_out, W_out);
-    for (int c = 0; c < C_in; ++c)
+    for (int b = 0; b < B_in; ++b)
     {
-        uint8_t  *in_base  = input  + c * H_in * W_in;
-        uint8_t  *out_base = output + c * H_out * W_out;
+        uint8_t *in_b  = input  + b * C_in  * H_in * W_in;
+        uint8_t *out_b = output + b * C_in * H_out * W_out;
 
-        for (int i = 0; i < H_out; ++i)
+        for (int c = 0; c < C_in; ++c)
         {
-            int in_i0 = i * stride;
+            // uint8_t  *in_base  = input  + c * H_in * W_in;
+            // uint8_t  *out_b = output + c * H_out * W_out;
+            const uint8_t *in_c  = in_b  + c * H_in * W_in;   /* ← add channel offset */
+            uint8_t       *out_c = out_b + c * H_out * W_out; /* ← add channel offset */
 
-            for (int j = 0; j < W_out; ++j)
+            for (int i = 0; i < H_out; ++i)
             {
-                int in_j0 = j * stride;
+                int in_i0 = i * stride;
 
-                /* ---------- find max in K×K window ------------------- */
-                uint8_t  max_val = in_base[(in_i0)*W_in + in_j0];
-
-                for (int ki = 0; ki < K; ++ki)
+                for (int j = 0; j < W_out; ++j)
                 {
-                    const uint8_t *row = in_base + (in_i0 + ki) * W_in + in_j0;
-                    for (int kj = 0; kj < K; ++kj)
+                    int in_j0 = j * stride;
+
+                    /* ---------- find max in K×K window ------------------- */
+                    uint8_t  max_val = in_c[(in_i0)*W_in + in_j0];
+
+                    for (int ki = 0; ki < K; ++ki)
                     {
-                        uint8_t v = row[kj];
-                        if (v > max_val) max_val = v;
+                        const uint8_t *row = in_c + (in_i0 + ki) * W_in + in_j0;
+                        for (int kj = 0; kj < K; ++kj)
+                        {
+                            uint8_t v = row[kj];
+                            if (v > max_val) max_val = v;
+                        }
                     }
+                    out_c[i * W_out + j] = max_val;
                 }
-                out_base[i * W_out + j] = max_val;
             }
         }
     }
@@ -231,6 +271,11 @@ void relu_quant(
     uint8_t zero_point
 )
 {
-
+    uint32_t size = input_batch_amt * img_channel * img_H * img_W;
+    uint32_t idx;
+    for (idx =0; idx < size; ++idx){
+        if (input[idx] < zero_point)
+            input[idx] = zero_point;
+    }
 
 }
