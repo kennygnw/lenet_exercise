@@ -20,6 +20,8 @@
 #define c2_padding 0
 #define c3_output_channel 120
 #define c3_padding 0
+#define fc1_feature_out 84
+#define fc2_feature_out 10
 
 int main() {
 
@@ -195,7 +197,6 @@ int main() {
     const int c3_H_out = (c2_maxpool_H_out + 2*c3_padding - c_kernel_size)/c_stride + 1;
     const int c3_W_out = (c2_maxpool_W_out + 2*c3_padding - c_kernel_size)/c_stride + 1;
     uint8_t c3_output[batch_amt* c3_output_channel* c3_H_out* c3_W_out];
-    // TODO ADD VARIABLES
     
     conv2d(
         (uint8_t *)c2_maxpool_out,
@@ -208,20 +209,64 @@ int main() {
         c2_zero_point, 0, c3_zero_point,
         c_stride, c3_padding
     );
-    // printf("c2 result:\n");
+    relu_quant(
+        (uint8_t*) c3_output,
+        batch_amt, c3_output_channel, c3_H_out, c3_H_out,
+        c3_zero_point
+    );
+    // printf("c3 result:\n");
     // for (uint8_t batch = 0; batch < batch_amt; ++batch){
     //     printf("batch %d\n", batch);
-    //     for (uint8_t channel = 0; channel < c2_output_channel; ++channel){
-    //         printf("channel %d\n",channel);
-    //         for (uint8_t i = 0; i < c2_H_out; ++i) {
+    //     for (uint8_t channel = 0; channel < c3_output_channel; ++channel){
+    //         // printf("channel %d\n",channel);
+    //         for (uint8_t i = 0; i < c3_H_out; ++i) {
     //             // printf("i %d\n",i);
-    //             for (uint8_t j = 0; j < c2_W_out; ++j) {
-    //                 printf("%d,", c2_output[((batch * batch_amt + channel) * c2_H_out + i) * c2_W_out + j]);
+    //             for (uint8_t j = 0; j < c3_W_out; ++j) {
+    //                 printf("%d, ", c3_output[((batch * batch_amt + channel) * c3_H_out + i) * c3_W_out + j]);
     //             }
-    //             printf("\n");
     //         }
     //     }
     // }
-
+    uint8_t fc1_output[fc1_feature_out]; 
+    fully_connected(
+        (uint8_t *) c3_output,
+        batch_amt, c3_output_channel,
+        (uint8_t *)fc1_weight,
+        fc1_feature_out,
+        (int32_t *)fc1_bias,
+        (uint8_t *)fc1_output,
+        fc1_real_scale,
+        fc1_zero_point, c3_zero_point, 0
+    );
+    relu_quant(
+        (uint8_t*) fc1_output,
+        batch_amt, fc1_feature_out, 1, 1,
+        fc1_zero_point
+    );
+    // printf("fc1 result:\n");
+    // for (uint8_t batch = 0; batch < batch_amt; ++batch){
+    //     printf("batch %d\n", batch);
+    //     for (uint8_t channel = 0; channel < fc1_feature_out; ++channel){
+    //                 printf("%d, ", fc1_output[((batch * batch_amt + channel))]);
+    //     }
+    // }
+    uint8_t fc2_output[fc2_feature_out]; 
+    fully_connected(
+        (uint8_t *) fc1_output,
+        batch_amt, fc1_feature_out,
+        (uint8_t *)fc2_weight,
+        fc2_feature_out,
+        (int32_t *)fc2_bias,
+        (uint8_t *)fc2_output,
+        fc2_real_scale,
+        fc2_zero_point, fc1_zero_point, 0
+    );
+    printf("fc2 result:\n");
+    for (uint8_t batch = 0; batch < batch_amt; ++batch){
+        printf("batch %d\n", batch);
+        for (uint8_t channel = 0; channel < fc2_feature_out; ++channel){
+                    printf("%d, ", fc2_output[((batch * batch_amt + channel))]);
+        }
+    }
     return 0;
 }
